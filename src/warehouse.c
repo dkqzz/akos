@@ -107,7 +107,7 @@ static void mark_unreachable(Warehouse *warehouse, WhTask *task)
                warehouse->tick, task->id);
 }
 
-static void assign_pending_tasks(Warehouse *warehouse)
+void wh_assign_pending_tasks(Warehouse *warehouse)
 {
     for (int task_index = 0; task_index < warehouse->task_count; ++task_index)
     {
@@ -213,6 +213,32 @@ void wh_init(Warehouse *warehouse, int width, int height)
     {
         warehouse->robots[index].task_id = -1;
     }
+}
+
+int wh_runtime_init(Warehouse *warehouse)
+{
+    if (pthread_mutex_init(&warehouse->state_mutex, NULL) != 0)
+    {
+        return -1;
+    }
+    if (pthread_mutex_init(&warehouse->output_mutex, NULL) != 0)
+    {
+        pthread_mutex_destroy(&warehouse->state_mutex);
+        return -1;
+    }
+    warehouse->sync_ready = true;
+    return 0;
+}
+
+void wh_runtime_destroy(Warehouse *warehouse)
+{
+    if (!warehouse->sync_ready)
+    {
+        return;
+    }
+    pthread_mutex_destroy(&warehouse->output_mutex);
+    pthread_mutex_destroy(&warehouse->state_mutex);
+    warehouse->sync_ready = false;
 }
 
 static WhPosition robot_goal(const Warehouse *warehouse, const WhRobot *robot)
@@ -468,6 +494,127 @@ static void process_moves(Warehouse *warehouse)
     }
 }
 
+static void process_one_robot_move(Warehouse *warehouse, WhRobot *robot)
+{
+    if (robot->state != WH_ROBOT_TO_PICKUP &&
+        robot->state != WH_ROBOT_TO_DROPOFF)
+    {
+        return;
+    }
+
+    WhPosition goal = robot_goal(warehouse, robot);
+    if (robot->route_len == 0 || robot->route_index >= robot->route_len ||
+        !same_position(robot->route[robot->route_len - 1], goal))
+    {
+        if (!plan_robot_route(warehouse, robot, goal))
+        {
+            robot->wait_ticks++;
+            warehouse->stats_waits++;
+            emit_event(warehouse,
+                       "[tick %d] robot %d cannot find a route from (%d,%d)\n",
+                       warehouse->tick, robot->id, robot->position.row,
+                       robot->position.col);
+            return;
+        }
+    }
+
+    WhPosition next;
+    if (!wh_next_step(warehouse, robot, &next))
+    {
+        return;
+    }
+
+    if (robot->energy < warehouse->move_energy &&
+        warehouse->cells[robot->position.row][robot->position.col] == WH_CHARGE)
+    {
+        int old_energy = robot->energy;
+        robot->energy += warehouse->charge_rate;
+        if (robot->energy > robot->max_energy)
+        {
+            robot->energy = robot->max_energy;
+        }
+        emit_event(warehouse, "[tick %d] robot %d charged %d -> %d\n",
+                   warehouse->tick, robot->id, old_energy, robot->energy);
+        robot->wait_ticks = 0;
+        return;
+    }
+
+    bool allowed = robot->energy >= warehouse->move_energy &&
+                   !is_blocked_cell(warehouse, next) &&
+                   robot_index_at(warehouse, next) < 0;
+    WhCell target_cell = warehouse->cells[next.row][next.col];
+    if (allowed && target_cell == WH_NARROW &&
+        warehouse->narrow_owner[next.row][next.col] != -1 &&
+        warehouse->narrow_owner[next.row][next.col] != robot->id)
+    {
+        allowed = false;
+    }
+
+    if (!allowed)
+    {
+        robot->wait_ticks++;
+        warehouse->stats_waits++;
+        emit_event(warehouse, "[tick %d] robot %d waits at (%d,%d)\n",
+                   warehouse->tick, robot->id, robot->position.row,
+                   robot->position.col);
+        if (robot->wait_ticks > warehouse->max_wait_ticks)
+        {
+            robot->wait_ticks = warehouse->max_wait_ticks;
+            emit_event(warehouse,
+                       "[tick %d] robot %d still blocked; keeps reservation policy\n",
+                       warehouse->tick, robot->id);
+        }
+        return;
+    }
+
+    WhPosition from = robot->position;
+    WhCell source_cell = warehouse->cells[from.row][from.col];
+    robot->position = next;
+    if (robot->route_index < robot->route_len)
+    {
+        robot->route_index++;
+    }
+    robot->energy -= warehouse->move_energy;
+    if (robot->energy < 0)
+    {
+        robot->energy = 0;
+    }
+    robot->distance++;
+    robot->wait_ticks = 0;
+    if (target_cell == WH_NARROW)
+    {
+        warehouse->narrow_owner[next.row][next.col] = robot->id;
+    }
+    if (source_cell == WH_NARROW &&
+        warehouse->narrow_owner[from.row][from.col] == robot->id)
+    {
+        warehouse->narrow_owner[from.row][from.col] = -1;
+    }
+    warehouse->stats_moves++;
+    emit_event(warehouse, "[tick %d] robot %d moved (%d,%d)->(%d,%d), energy=%d\n",
+               warehouse->tick, robot->id, from.row, from.col, next.row,
+               next.col, robot->energy);
+}
+
+void wh_robot_step_locked(Warehouse *warehouse, int robot_index)
+{
+    if (robot_index < 0 || robot_index >= warehouse->robot_count)
+    {
+        return;
+    }
+
+    WhRobot *robot = &warehouse->robots[robot_index];
+    update_operation(warehouse, robot);
+    charge_idle_robot(warehouse, robot);
+    if (robot->state != WH_ROBOT_TO_PICKUP &&
+        robot->state != WH_ROBOT_TO_DROPOFF)
+    {
+        return;
+    }
+    start_operation_if_at_goal(warehouse, robot);
+    process_one_robot_move(warehouse, robot);
+}
+
 bool wh_validate_invariants(const Warehouse *warehouse, char *message,
                             size_t message_size)
 {
@@ -541,7 +688,7 @@ int wh_step(Warehouse *warehouse)
     {
         return 1;
     }
-    assign_pending_tasks(warehouse);
+    wh_assign_pending_tasks(warehouse);
     for (int index = 0; index < warehouse->robot_count; ++index)
     {
         update_operation(warehouse, &warehouse->robots[index]);
@@ -572,46 +719,16 @@ bool wh_all_done(const Warehouse *warehouse)
     return true;
 }
 
-int wh_run(Warehouse *warehouse, int max_ticks, int delay_ms)
+void wh_request_stop(Warehouse *warehouse)
 {
-    if (max_ticks <= 0)
+    if (warehouse->sync_ready)
     {
-        max_ticks = warehouse->max_ticks;
+        pthread_mutex_lock(&warehouse->state_mutex);
+        warehouse->stop_requested = true;
+        pthread_mutex_unlock(&warehouse->state_mutex);
     }
-    int status = 0;
-    while (!warehouse->stop_requested && wh_signal_stop == 0 && !wh_all_done(warehouse) &&
-           warehouse->tick < max_ticks)
-    {
-        int result = wh_step(warehouse);
-        if (result < 0)
-        {
-            status = 1;
-            break;
-        }
-        if (!warehouse->quiet && warehouse->output_fd >= 0)
-        {
-            dprintf(warehouse->output_fd, "MAP tick %d\n", warehouse->tick);
-            wh_print_map(warehouse);
-        }
-        if (delay_ms > 0)
-        {
-            usleep((useconds_t)delay_ms * 1000U);
-        }
-    }
-    if (wh_signal_stop != 0)
+    else
     {
         warehouse->stop_requested = true;
     }
-    const char *reason = status != 0 ? "invariant violation" : (warehouse->stop_requested ? "interrupted" : (wh_all_done(warehouse) ? "all tasks resolved" : "tick limit"));
-    emit_event(warehouse,
-               "SUMMARY reason=%s ticks=%d assigned=%d completed=%d unreachable=%d moves=%d waits=%d\n",
-               reason, warehouse->tick, warehouse->stats_assigned,
-               warehouse->stats_completed, warehouse->stats_unreachable,
-               warehouse->stats_moves, warehouse->stats_waits);
-    return status;
-}
-
-void wh_request_stop(Warehouse *warehouse)
-{
-    warehouse->stop_requested = true;
 }

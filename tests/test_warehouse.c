@@ -2,7 +2,10 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 static Warehouse make_open_warehouse(void)
 {
@@ -130,6 +133,72 @@ static void test_run_reports_invariant_error(void)
     assert(wh_run(&warehouse, 5, 0) != 0);
 }
 
+static void test_condition_backend_delivers_task(void)
+{
+    Warehouse warehouse = make_open_warehouse();
+    wh_set_cell(&warehouse, 0, 0, WH_PICKUP);
+    wh_set_cell(&warehouse, 4, 4, WH_DROPOFF);
+    assert(wh_add_robot(&warehouse, 1, 0, 1, 10, 50, 50) == 0);
+    assert(wh_add_task(&warehouse, 7, 0, 0, 4, 4, 5) == 0);
+
+    assert(wh_run_cond(&warehouse, 100, 0) == 0);
+    assert(warehouse.tasks[0].status == WH_TASK_COMPLETED);
+    assert(warehouse.stats_completed == 1);
+}
+
+static void test_semaphore_backend_resolves_conflict_scenario(void)
+{
+    Warehouse warehouse;
+    wh_init(&warehouse, 1, 1);
+    warehouse.output_fd = -1;
+    warehouse.log_fd = -1;
+    warehouse.quiet = true;
+    assert(wh_load_config(&warehouse, "data/conflict.cfg") == 0);
+
+    assert(wh_run(&warehouse, warehouse.max_ticks, 0) == 0);
+    assert(warehouse.stats_completed == 2);
+    assert(warehouse.stats_unreachable == 0);
+    assert(wh_validate_invariants(&warehouse, NULL, 0));
+}
+
+static void test_threaded_log_contains_complete_records(void)
+{
+    char log_path[] = "/tmp/warehouse-thread-log-XXXXXX";
+    int log_fd = mkstemp(log_path);
+    assert(log_fd >= 0);
+    assert(unlink(log_path) == 0);
+
+    Warehouse warehouse;
+    wh_init(&warehouse, 1, 1);
+    warehouse.output_fd = -1;
+    warehouse.log_fd = log_fd;
+    warehouse.quiet = true;
+    assert(wh_load_config(&warehouse, "data/demo.cfg") == 0);
+    warehouse.output_fd = -1;
+    warehouse.log_fd = log_fd;
+    warehouse.quiet = true;
+
+    assert(wh_run(&warehouse, warehouse.max_ticks, 0) == 0);
+    assert(lseek(log_fd, 0, SEEK_SET) == 0);
+    char log[32768];
+    ssize_t length = read(log_fd, log, sizeof(log) - 1U);
+    assert(length > 0);
+    log[length] = '\0';
+    bool summary_found = false;
+    for (char *line = strtok(log, "\n"); line != NULL;
+         line = strtok(NULL, "\n"))
+    {
+        if (strncmp(line, "SUMMARY ", 8) == 0)
+        {
+            summary_found = true;
+        }
+        assert(strncmp(line, "[tick ", 6) == 0 ||
+               strncmp(line, "SUMMARY ", 8) == 0);
+    }
+    assert(summary_found);
+    assert(close(log_fd) == 0);
+}
+
 int main(void)
 {
     test_route_avoids_obstacle();
@@ -140,6 +209,9 @@ int main(void)
     test_configuration_is_loaded();
     test_robot_charges_before_moving();
     test_run_reports_invariant_error();
+    test_condition_backend_delivers_task();
+    test_semaphore_backend_resolves_conflict_scenario();
+    test_threaded_log_contains_complete_records();
     puts("warehouse tests passed");
     return 0;
 }

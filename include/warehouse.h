@@ -2,6 +2,7 @@
 #define WAREHOUSE_H
 
 #include <stdbool.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
 
@@ -105,6 +106,9 @@ typedef struct
     int log_fd;
     bool quiet;
     bool stop_requested;
+    pthread_mutex_t state_mutex;
+    pthread_mutex_t output_mutex;
+    bool sync_ready;
     int narrow_owner[WH_MAX_HEIGHT][WH_MAX_WIDTH];
 } Warehouse;
 
@@ -120,10 +124,15 @@ bool wh_find_route(const Warehouse *warehouse, WhPosition start,
                    WhPosition goal, WhPosition *route, int *route_len);
 bool wh_next_step(const Warehouse *warehouse, const WhRobot *robot,
                   WhPosition *next);
+int wh_runtime_init(Warehouse *warehouse);
+void wh_runtime_destroy(Warehouse *warehouse);
+void wh_assign_pending_tasks(Warehouse *warehouse);
+void wh_robot_step_locked(Warehouse *warehouse, int robot_index);
 bool wh_validate_invariants(const Warehouse *warehouse, char *message,
                             size_t message_size);
 int wh_step(Warehouse *warehouse);
 int wh_run(Warehouse *warehouse, int max_ticks, int delay_ms);
+int wh_run_cond(Warehouse *warehouse, int max_ticks, int delay_ms);
 bool wh_all_done(const Warehouse *warehouse);
 void wh_request_stop(Warehouse *warehouse);
 void emit_event(Warehouse *warehouse, const char *format, ...);

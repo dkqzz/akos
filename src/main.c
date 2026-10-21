@@ -154,7 +154,12 @@ int main(int argc, char **argv)
                 warehouse.task_count, warehouse.seed);
         wh_print_map(&warehouse);
     }
+#ifdef WH_USE_COND
+    int run_result = wh_run_cond(&warehouse, warehouse.max_ticks,
+                                 warehouse.delay_ms);
+#else
     int run_result = wh_run(&warehouse, warehouse.max_ticks, warehouse.delay_ms);
+#endif
     if (interrupted != 0)
     {
         wh_request_stop(&warehouse);
