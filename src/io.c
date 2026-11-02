@@ -1,9 +1,73 @@
 #include "warehouse.h"
+#include "io.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
+
+typedef struct
+{
+    Warehouse *warehouse;
+    int output_fd;
+    int log_fd;
+    bool quiet;
+    sem_t *lock;
+} WhOutput;
+
+static _Thread_local WhOutput output;
+
+void wh_output_bind(Warehouse *warehouse, int output_fd, int log_fd,
+                    bool quiet, sem_t *lock)
+{
+    output = (WhOutput){warehouse, output_fd, log_fd, quiet, lock};
+}
+
+void wh_output_unbind(void)
+{
+    output = (WhOutput){0};
+}
+
+static int output_fd(const Warehouse *warehouse)
+{
+    return output.warehouse == warehouse ? output.output_fd : warehouse->output_fd;
+}
+
+static int log_fd(const Warehouse *warehouse)
+{
+    return output.warehouse == warehouse ? output.log_fd : warehouse->log_fd;
+}
+
+static bool quiet_output(const Warehouse *warehouse)
+{
+    return output.warehouse == warehouse ? output.quiet : warehouse->quiet;
+}
+
+static void output_lock(Warehouse *warehouse)
+{
+    if (output.warehouse == warehouse && output.lock != NULL)
+    {
+        while (sem_wait(output.lock) != 0 && errno == EINTR)
+        {
+        }
+    }
+    else if (warehouse->sync_ready)
+    {
+        pthread_mutex_lock(&warehouse->output_mutex);
+    }
+}
+
+static void output_unlock(Warehouse *warehouse)
+{
+    if (output.warehouse == warehouse && output.lock != NULL)
+    {
+        sem_post(output.lock);
+    }
+    else if (warehouse->sync_ready)
+    {
+        pthread_mutex_unlock(&warehouse->output_mutex);
+    }
+}
 
 /* one place for terminal and log output */
 
@@ -45,35 +109,29 @@ void emit_event(Warehouse *warehouse, const char *format, ...)
         length = (int)sizeof(text) - 1;
     }
 
-    if (warehouse->sync_ready)
+    output_lock(warehouse);
+    int terminal = output_fd(warehouse);
+    int log = log_fd(warehouse);
+    if (!quiet_output(warehouse) && terminal >= 0)
     {
-        pthread_mutex_lock(&warehouse->output_mutex);
+        write_all(terminal, text, (size_t)length);
     }
-    if (!warehouse->quiet && warehouse->output_fd >= 0)
+    if (log >= 0 && log != terminal)
     {
-        write_all(warehouse->output_fd, text, (size_t)length);
+        write_all(log, text, (size_t)length);
     }
-    if (warehouse->log_fd >= 0 && warehouse->log_fd != warehouse->output_fd)
-    {
-        write_all(warehouse->log_fd, text, (size_t)length);
-    }
-    if (warehouse->sync_ready)
-    {
-        pthread_mutex_unlock(&warehouse->output_mutex);
-    }
+    output_unlock(warehouse);
 }
 
 void wh_print_map(const Warehouse *warehouse)
 {
-    if (warehouse->quiet || warehouse->output_fd < 0)
+    int terminal = output_fd(warehouse);
+    if (quiet_output(warehouse) || terminal < 0)
     {
         return;
     }
     Warehouse *mutable_warehouse = (Warehouse *)warehouse;
-    if (mutable_warehouse->sync_ready)
-    {
-        pthread_mutex_lock(&mutable_warehouse->output_mutex);
-    }
+    output_lock(mutable_warehouse);
     char line[WH_MAX_WIDTH + 2];
     for (int row = 0; row < warehouse->height; row++)
     {
@@ -94,10 +152,7 @@ void wh_print_map(const Warehouse *warehouse)
         }
         line[length] = '\n';
         length++;
-        write_all(warehouse->output_fd, line, (size_t)length);
+        write_all(terminal, line, (size_t)length);
     }
-    if (mutable_warehouse->sync_ready)
-    {
-        pthread_mutex_unlock(&mutable_warehouse->output_mutex);
-    }
+    output_unlock(mutable_warehouse);
 }

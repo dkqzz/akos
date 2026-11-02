@@ -1,5 +1,6 @@
 #include "warehouse.h"
 #include "config.h"
+#include "process.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -14,7 +15,7 @@ static volatile sig_atomic_t interrupted = 0;
 static void on_sigint(int signal_number)
 {
     /* the handler sets a flag; cleanup stays in main */
-    if (signal_number == SIGINT)
+    if (signal_number == SIGINT || signal_number == SIGTERM)
     {
         interrupted = 1;
         wh_signal_stop = 1;
@@ -145,6 +146,7 @@ int main(int argc, char **argv)
     warehouse.output_fd = STDOUT_FILENO;
     warehouse.log_fd = log_fd;
     signal(SIGINT, on_sigint);
+    signal(SIGTERM, on_sigint);
 
     if (!warehouse.quiet)
     {
@@ -154,7 +156,13 @@ int main(int argc, char **argv)
                 warehouse.task_count, warehouse.seed);
         wh_print_map(&warehouse);
     }
-#ifdef WH_USE_COND
+#ifdef WH_PROCESS_NAMED
+    int run_result = wh_run_process_parent(&warehouse, warehouse.max_ticks,
+                                           warehouse.delay_ms, true);
+#elif defined(WH_PROCESS_UNNAMED)
+    int run_result = wh_run_process_parent(&warehouse, warehouse.max_ticks,
+                                           warehouse.delay_ms, false);
+#elif defined(WH_USE_COND)
     int run_result = wh_run_cond(&warehouse, warehouse.max_ticks,
                                  warehouse.delay_ms);
 #else
