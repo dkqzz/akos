@@ -109,6 +109,11 @@ static void mark_unreachable(Warehouse *warehouse, WhTask *task)
 
 void wh_assign_pending_tasks(Warehouse *warehouse)
 {
+    wh_assign_available_tasks(warehouse, NULL);
+}
+
+void wh_assign_available_tasks(Warehouse *warehouse, const bool available[])
+{
     for (int task_index = 0; task_index < warehouse->task_count; ++task_index)
     {
         WhTask *task = &warehouse->tasks[task_index];
@@ -124,7 +129,8 @@ void wh_assign_pending_tasks(Warehouse *warehouse)
              ++robot_index)
         {
             WhRobot *robot = &warehouse->robots[robot_index];
-            if (robot->state != WH_ROBOT_IDLE || robot->task_id != -1 ||
+            if ((available != NULL && !available[robot_index]) ||
+                robot->state != WH_ROBOT_IDLE || robot->task_id != -1 ||
                 robot->capacity < task->weight)
             {
                 continue;
@@ -383,15 +389,16 @@ static void sort_requests(MoveRequest *requests, int count,
     }
 }
 
-static void process_moves(Warehouse *warehouse)
+static void process_moves(Warehouse *warehouse, const bool active[])
 {
     MoveRequest requests[WH_MAX_ROBOTS];
     int request_count = 0;
     for (int index = 0; index < warehouse->robot_count; ++index)
     {
         WhRobot *robot = &warehouse->robots[index];
-        if (robot->state != WH_ROBOT_TO_PICKUP &&
-            robot->state != WH_ROBOT_TO_DROPOFF)
+        if ((active != NULL && !active[index]) ||
+            (robot->state != WH_ROBOT_TO_PICKUP &&
+             robot->state != WH_ROBOT_TO_DROPOFF))
         {
             continue;
         }
@@ -465,6 +472,8 @@ static void process_moves(Warehouse *warehouse)
             if (target_cell == WH_NARROW)
             {
                 warehouse->narrow_owner[request->to.row][request->to.col] = robot->id;
+                emit_event(warehouse, "[tick %d] robot %d reserved narrow cell (%d,%d)\n",
+                           warehouse->tick, robot->id, request->to.row, request->to.col);
             }
             if (source_cell == WH_NARROW &&
                 warehouse->narrow_owner[request->from.row][request->from.col] == robot->id)
@@ -689,12 +698,21 @@ int wh_step(Warehouse *warehouse)
         return 1;
     }
     wh_assign_pending_tasks(warehouse);
+    return wh_advance_tick(warehouse, NULL);
+}
+
+/* disconnected robots occupy their cells, but do not advance their actions */
+int wh_advance_tick(Warehouse *warehouse, const bool active[])
+{
     for (int index = 0; index < warehouse->robot_count; ++index)
     {
-        update_operation(warehouse, &warehouse->robots[index]);
-        charge_idle_robot(warehouse, &warehouse->robots[index]);
+        if (active == NULL || active[index])
+        {
+            update_operation(warehouse, &warehouse->robots[index]);
+            charge_idle_robot(warehouse, &warehouse->robots[index]);
+        }
     }
-    process_moves(warehouse);
+    process_moves(warehouse, active);
     warehouse->tick++;
     char message[160];
     if (!wh_validate_invariants(warehouse, message, sizeof(message)))

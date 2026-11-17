@@ -13,6 +13,8 @@ typedef struct
     int log_fd;
     bool quiet;
     sem_t *lock;
+    WhEventSink sink;
+    void *context;
 } WhOutput;
 
 static _Thread_local WhOutput output;
@@ -20,12 +22,18 @@ static _Thread_local WhOutput output;
 void wh_output_bind(Warehouse *warehouse, int output_fd, int log_fd,
                     bool quiet, sem_t *lock)
 {
-    output = (WhOutput){warehouse, output_fd, log_fd, quiet, lock};
+    output = (WhOutput){.warehouse = warehouse, .output_fd = output_fd, .log_fd = log_fd, .quiet = quiet, .lock = lock};
 }
 
 void wh_output_unbind(void)
 {
     output = (WhOutput){0};
+}
+
+void wh_output_set_event_sink(WhEventSink sink, void *context)
+{
+    output.sink = sink;
+    output.context = context;
 }
 
 static int output_fd(const Warehouse *warehouse)
@@ -121,6 +129,29 @@ void emit_event(Warehouse *warehouse, const char *format, ...)
         write_all(log, text, (size_t)length);
     }
     output_unlock(warehouse);
+    if (output.warehouse == warehouse && output.sink != NULL)
+    {
+        output.sink(output.context, text);
+    }
+}
+
+void wh_format_map_row(const Warehouse *warehouse, int row, char line[])
+{
+    for (int col = 0; col < warehouse->width; col++)
+    {
+        char symbol = (char)warehouse->cells[row][col];
+        for (int robot = 0; robot < warehouse->robot_count; robot++)
+        {
+            const WhRobot *item = &warehouse->robots[robot];
+            if (item->position.row == row && item->position.col == col)
+            {
+                symbol = item->id >= 0 && item->id < 10 ? (char)('0' + item->id) : 'R';
+                break;
+            }
+        }
+        line[col] = symbol;
+    }
+    line[warehouse->width] = '\0';
 }
 
 void wh_print_map(const Warehouse *warehouse)
@@ -135,24 +166,9 @@ void wh_print_map(const Warehouse *warehouse)
     char line[WH_MAX_WIDTH + 2];
     for (int row = 0; row < warehouse->height; row++)
     {
-        int length = 0;
-        for (int col = 0; col < warehouse->width; col++)
-        {
-            char symbol = (char)warehouse->cells[row][col];
-            for (int robot = 0; robot < warehouse->robot_count; robot++)
-            {
-                const WhRobot *item = &warehouse->robots[robot];
-                if (item->position.row == row && item->position.col == col)
-                {
-                    symbol = item->id < 10 ? (char)('0' + item->id) : 'R';
-                }
-            }
-            line[length] = symbol;
-            length++;
-        }
-        line[length] = '\n';
-        length++;
-        write_all(terminal, line, (size_t)length);
+        wh_format_map_row(warehouse, row, line);
+        line[warehouse->width] = '\n';
+        write_all(terminal, line, (size_t)warehouse->width + 1);
     }
     output_unlock(mutable_warehouse);
 }

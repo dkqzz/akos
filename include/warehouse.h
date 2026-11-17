@@ -127,10 +127,12 @@ bool wh_next_step(const Warehouse *warehouse, const WhRobot *robot,
 int wh_runtime_init(Warehouse *warehouse);
 void wh_runtime_destroy(Warehouse *warehouse);
 void wh_assign_pending_tasks(Warehouse *warehouse);
+void wh_assign_available_tasks(Warehouse *warehouse, const bool available[]);
 void wh_robot_step_locked(Warehouse *warehouse, int robot_index);
 bool wh_validate_invariants(const Warehouse *warehouse, char *message,
                             size_t message_size);
 int wh_step(Warehouse *warehouse);
+int wh_advance_tick(Warehouse *warehouse, const bool active[]);
 int wh_run(Warehouse *warehouse, int max_ticks, int delay_ms);
 int wh_run_cond(Warehouse *warehouse, int max_ticks, int delay_ms);
 bool wh_all_done(const Warehouse *warehouse);

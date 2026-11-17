@@ -59,3 +59,26 @@ add_test(NAME warehouse_process_tests
     COMMAND sh scripts/test_process_modes.sh)
 set_tests_properties(warehouse_process_tests PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_library(warehouse_tcp_runtime src/tcp.c)
+target_link_libraries(warehouse_tcp_runtime PUBLIC warehouse_model)
+
+add_executable(warehouse_tcp_server src/tcp_server.c)
+target_link_libraries(warehouse_tcp_server PRIVATE warehouse_tcp_runtime)
+
+add_executable(warehouse_tcp_robot src/tcp_client.c)
+target_compile_definitions(warehouse_tcp_robot PRIVATE WH_TCP_ROBOT=1)
+target_link_libraries(warehouse_tcp_robot PRIVATE warehouse_tcp_runtime)
+
+add_executable(warehouse_tcp_observer src/tcp_client.c)
+target_link_libraries(warehouse_tcp_observer PRIVATE warehouse_tcp_runtime)
+
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME warehouse_tcp_tests
+        COMMAND "${Python3_EXECUTABLE}" scripts/test_tcp.py "$<TARGET_FILE_DIR:warehouse_tcp_server>")
+    set_tests_properties(warehouse_tcp_tests PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 70)
+endif()

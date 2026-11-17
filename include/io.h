@@ -8,5 +8,8 @@
 void wh_output_bind(Warehouse *warehouse, int output_fd, int log_fd,
                     bool quiet, sem_t *lock);
 void wh_output_unbind(void);
+typedef void (*WhEventSink)(void *context, const char *text);
+void wh_output_set_event_sink(WhEventSink sink, void *context);
+void wh_format_map_row(const Warehouse *warehouse, int row, char line[]);
 
 #endif
